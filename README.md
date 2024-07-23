@@ -1,26 +1,7 @@
-# CUDA_3D_Autoencoder_NIfTI
-
-A CUDA-accelerated 3D autoencoder for processing NIfTI images, utilizing convolutional neural networks for efficient image encoding and decoding.
-
-## Table of Contents
-
-- [Introduction](#introduction)
-- [Features](#features)
-- [Installation](#installation)
-- [Usage](#usage)
-- [File Structure](#file-structure)
-- [Contributing](#contributing)
-- [License](#license)
-
+# Autoencoder_3D_C_CUDA
 ## Introduction
 
-This repository provides an implementation of a 3D autoencoder using CUDA for accelerating computations. The autoencoder is designed to handle NIfTI image files, which are commonly used in medical imaging.
-
-## Features
-
-- 3D convolutional autoencoder
-- CUDA acceleration for efficient computation
-- NIfTI image file support
+This repository provides an implementation of a 3D autoencoder in raw CUDA  C. The autoencoder handles NIfTI image files, but can be adapted to other file types.
 
 ## Installation
 
