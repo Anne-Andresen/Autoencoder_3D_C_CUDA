@@ -18,5 +18,5 @@ Download and install the NIfTI-1 library from the [NIfTI library website](https:
 ### Clone the Repository
 
 ```sh
-git clone https://github.com/Anne-Andresen/CUDA_3D_Autoencoder_NIfTI.git
-cd CUDA_3D_Autoencoder_NIfTI
+git clone https://github.com/Anne-Andresen/Autoencoder_3D_C_CUDA.git
+cd Autoencoder_3D_C_CUDA
