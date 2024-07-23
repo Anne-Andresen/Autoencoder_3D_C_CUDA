@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 
-oid init_encoder(Encoder* encoder, int inputDepth, int inputHeight, int inputWidth, int kernelSize) {
+void init_encoder(Encoder* encoder, int inputDepth, int inputHeight, int inputWidth, int kernelSize) {
     conv3d_init(&encoder->conv1, inputDepth, inputHeight, inputWidth, kernelSize, kernelSize, kernelSize);
     conv3d_init(&encoder->conv2, inputDepth, inputHeight, inputWidth, kernelSize, kernelSize, kernelSize);
     
@@ -15,7 +15,7 @@ void init_decoder(Decoder* decoder, int inputDepth, int inputHeight, int inputWi
     conv3d_init(&decoder->deconv2, inputDepth, inputHeight, inputWidth, kernelSize, kernelSize, kernelSize)
 
 }
-/*include additonal lernel size for down sampling*/
+/*include additonal kernel size for down sampling*/
 void init_autoencoder(Autoencoder* autoencoder, int inputDepth, int inputHeight, int inputWidth, int kernelSize) {
     init_encoder(&autoencoder->encoder, inputDepth, inputHeight, inputWidth, kernelSize);
     init_decoder(&autoencoder->decoder, inputDepth, inputHeight, inputWidth, kernelSize);
