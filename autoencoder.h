@@ -1,6 +1,6 @@
 #ifndef AUTOENCODER_H
 #define AUTOENCODER_H
-#include "conv3.h"
+#include <conv3d.h>
 
 typedef struct {
     Conv3D conv1;

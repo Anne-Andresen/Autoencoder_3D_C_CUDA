@@ -2,7 +2,9 @@
 #include <loss.h>
 #include <utils.h>
 #include <stdio.h>
-
+#include <cuda_runtime.h>
+#include <stdlib.h>
+#include <string.h>
 
 void init_encoder(Encoder* encoder, int inputDepth, int inputHeight, int inputWidth, int kernelSize) {
     conv3d_init(&encoder->conv1, inputDepth, inputHeight, inputWidth, kernelSize, kernelSize, kernelSize);
