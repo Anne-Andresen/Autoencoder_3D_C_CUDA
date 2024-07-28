@@ -18,4 +18,5 @@ void conv3d_set_input(Conv3D* conv, const float* input_data);
 void conv3d_set_kernel(Conv3D* conv, const float* kernel_data);
 void conv3d_execute(Conv3D* conv, float* output_data);
 void conv3d_free(Conv3D* conv);
+void conv3d_update_weights(Conv3D* conv, float learning_rate)
 #endif 
