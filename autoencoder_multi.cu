@@ -145,7 +145,68 @@ void backward_autoencoder(Autoencoder* autoencoder, float* d_input, float* d_out
     }
 
     float* d_grad_latent_space;
-    udaMalloc(&d_grad_latent_space, autoencoder->decoder.deconv1.convs[NUM_KERNELS - 1].D * autoencoder->decoder.deconv1.convs[NUM_KERNELS - 1].H * autoencoder->decoder.deconv1.convs[NUM_KERNELS - 1].W * sizeof(float));
-    backward_conv_layer()
+    cudaMalloc(&d_grad_latent_space, autoencoder->decoder.deconv1.convs[NUM_KERNELS - 1].D * autoencoder->decoder.deconv1.convs[NUM_KERNELS - 1].H * autoencoder->decoder.deconv1.convs[NUM_KERNELS - 1].W * sizeof(float));
+    backward_conv_layer(&autoencoder->decoder.deconv2, d_grad_output, d_grad_latent_space);
 
+    float* d_grad_intermediate;
+    cudaMalloc(&d_grad_intermediate, autoencoder->encoder.conv2.convs[NUM_KERNELS - 1].D * autoencoder->encoder.conv2.convs[NUM_KERNELS - 1].H * autoencoder->encoder.conv2.convs[NUM_KERNELS - 1].W * sizeof(float));
+    backward_conv_layer(&autoencoder->decoder.deconv1.convs[NUM_KERNELS - 1], d_grad_latent_space, d_grad_intermediate);
+
+    float* d_grad_input;
+    cudaMalloc(&d_grad_input, autoencoder->encoder.conv1.convs[NUM_KERNELS - 1].D * autoencoder->encoder.conv1.convs[NUM_KERNELS - 1].H * autoencoder->encoder.conv1.convs[NUM_KERNELS - 1].W * sizeof(float));
+    backward_conv_layer(&autoencoder->encoder.conv2, d_grad_intermediate, d_grad_input);
+
+
+    backward_conv_layer(&autoencoder->encoder.conv1, d_grad_input, NULL);
+
+    for (int i = 0; i < NUM_KERNELS; i++) {
+        conv3d_update_weights(&autoencoder->encoder.conv1[i], learning_rate);
+        conv3d_update_weights(&autoencoder->encoder.conv2[i], learning_rate);
+        conv3d_update_weights(&autoencoder->decoder.deconv1[i], learning_rate);
+        conv3d_update_weights(&autoencoder->decoder.deconv2[i], learning_rate);
+    }
+
+    cudaFree(d_grad_input);
+    cudaFree(d_grad_latent_space);
+    cudaFree(d_grad_intermediate);
+    cudaFree(d_grad_input);
+
+}
+
+
+
+void train_autoencoder(Autoencoder* autoencoder, float* d_input, float* d_target, int inputSize, int epochs, float learning_rate) {
+    float* d_output
+    cudaMalloc(&d_output, inputSize * sizeof(float));
+    for (int epoch = 0; epoch < epochs; epoch++) {
+        forward_autoencoder(autoencoder, d_input, d_output);
+        float loss = mean_square_error(d_output, d_target, inputSize);
+        printf("Epoch %d, Loss: %f\n", epoch, loss);
+        backward_autoencoder(autoencoder, d_input, d_output, d_target, learning_rate);
+    }
+    cudaFree(d_output);
+
+}
+
+void free_conv_layer(ConvLayer* layer) {
+    for (int i = 0; i < NUM_KERNELS; i ++) {
+        conv3d_free(&layer->convs[i]);
+    }
+
+}
+
+void free_encoder(Encoder* encoder) {
+    free_conv_layer(encoder->conv1);
+    free_conv_layer(encoder->conv2);
+
+}
+
+void free_decoder(Decoder* decoder) {
+    free_conv_layer(decoder->deconv1);
+    free_conv_layer(decoder->deconv2);
+}
+
+void free_autoencoder(Autoencoder* autoencoder) {
+    free_encoder(autoencoder->encoder);
+    free_decoder(autoencoder->decoder);
 }

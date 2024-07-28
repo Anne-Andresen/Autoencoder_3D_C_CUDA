@@ -234,16 +234,28 @@ void conv3d_execute(Conv3D* conv, float* output) {
 }
 
 void conv3d_backprop(Conv3D* conv, float* grad_output, float* grad_input) {
-    // Implement backpropagation for convolution
+    cudaMemset(conv->grad_weights, 0, conv->kernelD * conv->kernelH * conv->kernelW * sizeof(float));
+    cudaMemset(conv->grad_biases, 0, sizeof(float));
+    dim3 blockDim(8, 8, 8);
+    dim3 gridDim((conv->W + blockDim.x - 1) / blockDim.x, (conv->H + blockDim.y - 1) / blockDim.y, (conv->D + blockDim.z - 1) / blockDim.z);
+    conv3d_backward_kernel<<<gridDim, blockDim>>>(conv->input, conv->weights, conv->biases, grad_output, grad_input, conv->grad_weights, conv->grad_biases, conv->D, conv->H, conv->W, conv->kernelD, conv->kernelH, conv->kernelW);
+    cudaErrorCheck();
 }
 
 void conv3d_update_weights(Conv3D* conv, float learning_rate) {
+    float* h_grad_weights = (float*)malloc(conv->kernelD * conv->kernelH * conv->kernelW * sizeof(float));
+    float* h_grad_biases = (float*)malloc(sizeof(float));
+    cudaMemcpy(h_grad_weights, conv->grad_weights, conv->kernelD * conv->kernelH * conv->kernelW * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_grad_biases, conv->grad_biases, sizeof(float), cudaMemcpyDeviceToHost);
     for (int i = 0; i < conv->kernelD * conv->kernelH * conv->kernelW; i++) {
-        conv->weights[i] -= learning_rate * conv->grad_weights[i];
+        h_grad_weights[i] *= learning_rate;
     }
-    conv->biases[0] -= learning_rate * conv->grad_biases[0];
+    h_grad_biases[0] *= learning_rate;
+    cudaMemcpy(conv->weights, h_grad_weights, conv->kernelD * conv->kernelH * conv->kernelW * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(conv->biases, h_grad_biases, sizeof(float), cudaMemcpyHostToDevice);
+    free(h_grad_weights);
+    free(h_grad_biases);
 }
-
 void conv3d_free(Conv3D* conv) {
     free(conv->weights);
     free(conv->biases);
