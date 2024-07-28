@@ -13,7 +13,7 @@ This repository provides an implementation of a 3D autoencoder in raw CUDA  C. T
 
 ### Installing NIfTI-1 Library
 
-Download and install the NIfTI-1 library from the [NIfTI library website](https://nifti.nimh.nih.gov/nifti-1).
+Download and install the NIfTI-1 library from the [NIfTI library website]().
 
 ### Clone the Repository
 
