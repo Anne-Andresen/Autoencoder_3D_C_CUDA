@@ -329,6 +329,11 @@ void forward_conv_layer(ConvLayer* layer, float* d_input, float* d_output) {
         int size = conv->D * conv->H * conv->W;
         int threads = 256;
         int blocks = (size + threads - 1) / threads;
+        float* pre_activation_output;
+
+        // In forward_conv_layer, before applying ReLU:
+        cudaMalloc(&conv->pre_activation_output, conv->D * conv->H * conv->W * sizeof(float));
+        cudaMemcpy(conv->pre_activation_output, d_temp_output, conv->D * conv->H * conv->W * sizeof(float), cudaMemcpyDeviceToDevice);
         relu_activation_kernel<<<blocks, threads>>>(d_temp_output, size);
         cudaErrorCheck();
 
@@ -337,6 +342,7 @@ void forward_conv_layer(ConvLayer* layer, float* d_input, float* d_output) {
         } else {
             cudaMemcpy(d_output, d_temp_output, conv->D * conv->H * conv->W * sizeof(float), cudaMemcpyDeviceToDevice);
         }
+        cudaFree(conv->pre_activation_output);
     }
     cudaFree(d_temp_output);
 }
@@ -409,10 +415,9 @@ void forward_autoencoder_batch(Autoencoder* autoencoder, float** d_input_batch, 
     free(d_latent_space_batch);
 }
 
-
 void backward_conv_layer(ConvLayer* layer, float* d_grad_output, float* d_grad_input) {
-    float* d_temp_grad_input;
     float* d_inter_grad_output = d_grad_output;
+    float* d_temp_grad_input = NULL;
 
     for (int i = NUM_KERNELS - 1; i >= 0; i--) {
         Conv3D* conv = &layer->convs[i];
@@ -428,7 +433,7 @@ void backward_conv_layer(ConvLayer* layer, float* d_grad_output, float* d_grad_i
             (conv->D + blockDim.z - 1) / blockDim.z
         );
 
-        // Corrected kernel call
+        // Backward convolution kernel call
         conv3d_backward_kernel<<<gridDim, blockDim>>>(
             conv->input,
             conv->weights,
@@ -449,27 +454,45 @@ void backward_conv_layer(ConvLayer* layer, float* d_grad_output, float* d_grad_i
         int size = conv->D * conv->H * conv->W;
         int threads = 256;
         int blocks = (size + threads - 1) / threads;
+
         relu_backward_kernel<<<blocks, threads>>>(
             d_temp_grad_input,
-            conv->input,  // Assuming you saved activation input
+            conv->pre_activation_output,
             d_temp_grad_input,
             size
         );
         cudaErrorCheck();
 
+        // Free pre_activation_output as it's no longer needed
+        cudaFree(conv->pre_activation_output);
+
         if (i > 0) {
             // Prepare for next iteration
+            if (d_inter_grad_output != d_grad_output) {
+                cudaFree(d_inter_grad_output);
+            }
             d_inter_grad_output = d_temp_grad_input;
+            d_temp_grad_input = NULL; // Reset to NULL to avoid double free
         } else {
             // For the first layer, copy the gradient to d_grad_input
             cudaMemcpy(d_grad_input, d_temp_grad_input, conv->D * conv->H * conv->W * sizeof(float), cudaMemcpyDeviceToDevice);
             cudaFree(d_temp_grad_input);
+            d_temp_grad_input = NULL;
         }
+    }
+
+    // Free d_inter_grad_output if needed
+    if (d_inter_grad_output != d_grad_output && d_inter_grad_output != NULL) {
+        cudaFree(d_inter_grad_output);
     }
 }
 
 
 void backward_autoencoder(Autoencoder* autoencoder, float* d_input, float* d_output, float* d_target, float learning_rate) {
+    int input_size = autoencoder->encoder.conv1.convs[0].D *
+                 autoencoder->encoder.conv1.convs[0].H *
+                 autoencoder->encoder.conv1.convs[0].W;
+
     int size = autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].D *
                autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].H *
                autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].W;
@@ -513,6 +536,7 @@ void backward_autoencoder(Autoencoder* autoencoder, float* d_input, float* d_out
     cudaFree(d_grad_latent_space);
     cudaFree(d_grad_latent_space_prev);
     cudaFree(d_grad_input);
+}
 
 
 
@@ -590,21 +614,39 @@ __global__ void accumulate_gradients_kernel(float* accumulated_gradients, const 
     }
 }
 void reset_gradients(Autoencoder* autoencoder) {
-    // Reset gradients in encoder
+    // Reset gradients in encoder conv1
     for (int i = 0; i < NUM_KERNELS; i++) {
-        cudaMemset(autoencoder->encoder.conv1.convs[i].grad_weights, 0, weight_size);
-        cudaMemset(autoencoder->encoder.conv1.convs[i].grad_biases, 0, sizeof(float));
-        cudaMemset(autoencoder->encoder.conv2.convs[i].grad_weights, 0, weight_size);
-        cudaMemset(autoencoder->encoder.conv2.convs[i].grad_biases, 0, sizeof(float));
+        Conv3D* conv = &autoencoder->encoder.conv1.convs[i];
+        int weight_size = conv->kernelD * conv->kernelH * conv->kernelW * sizeof(float);
+        cudaMemset(conv->grad_weights, 0, weight_size);
+        cudaMemset(conv->grad_biases, 0, sizeof(float));
     }
-    // Reset gradients in decoder
+
+    // Reset gradients in encoder conv2
     for (int i = 0; i < NUM_KERNELS; i++) {
-        cudaMemset(autoencoder->decoder.deconv1.convs[i].grad_weights, 0, weight_size);
-        cudaMemset(autoencoder->decoder.deconv1.convs[i].grad_biases, 0, sizeof(float));
-        cudaMemset(autoencoder->decoder.deconv2.convs[i].grad_weights, 0, weight_size);
-        cudaMemset(autoencoder->decoder.deconv2.convs[i].grad_biases, 0, sizeof(float));
+        Conv3D* conv = &autoencoder->encoder.conv2.convs[i];
+        int weight_size = conv->kernelD * conv->kernelH * conv->kernelW * sizeof(float);
+        cudaMemset(conv->grad_weights, 0, weight_size);
+        cudaMemset(conv->grad_biases, 0, sizeof(float));
+    }
+
+    // Reset gradients in decoder deconv1
+    for (int i = 0; i < NUM_KERNELS; i++) {
+        Conv3D* conv = &autoencoder->decoder.deconv1.convs[i];
+        int weight_size = conv->kernelD * conv->kernelH * conv->kernelW * sizeof(float);
+        cudaMemset(conv->grad_weights, 0, weight_size);
+        cudaMemset(conv->grad_biases, 0, sizeof(float));
+    }
+
+    // Reset gradients in decoder deconv2
+    for (int i = 0; i < NUM_KERNELS; i++) {
+        Conv3D* conv = &autoencoder->decoder.deconv2.convs[i];
+        int weight_size = conv->kernelD * conv->kernelH * conv->kernelW * sizeof(float);
+        cudaMemset(conv->grad_weights, 0, weight_size);
+        cudaMemset(conv->grad_biases, 0, sizeof(float));
     }
 }
+
 
 
 __global__ void compute_grad_output_kernel(const float* d_output, const float* d_target, float* d_grad_output, int size) {
