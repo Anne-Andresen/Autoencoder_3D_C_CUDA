@@ -490,6 +490,17 @@ void backward_autoencoder(Autoencoder* autoencoder, float* d_input, float* d_out
 
     // Backpropagate through the decoder
     float* d_grad_latent_space;
+    int latent_size = autoencoder->encoder.conv2.convs[NUM_KERNELS - 1].D *
+                  autoencoder->encoder.conv2.convs[NUM_KERNELS - 1].H *
+                  autoencoder->encoder.conv2.convs[NUM_KERNELS - 1].W;
+    
+    int size_of_latent_space = latent_size * sizeof(float);
+
+    float* d_grad_latent_space_prev;
+    cudaMalloc(&d_grad_latent_space_prev, latent_size * sizeof(float));
+
+    float* d_grad_input;
+    cudaMalloc(&d_grad_input, input_size * sizeof(float)); // Define input_size appropriately
     cudaMalloc(&d_grad_latent_space, size_of_latent_space);
     backward_conv_layer(&autoencoder->decoder.deconv2, d_grad_output, d_grad_latent_space);
     backward_conv_layer(&autoencoder->decoder.deconv1, d_grad_latent_space, d_grad_latent_space_prev);
@@ -500,7 +511,56 @@ void backward_autoencoder(Autoencoder* autoencoder, float* d_input, float* d_out
     // Free allocated memory
     cudaFree(d_grad_output);
     cudaFree(d_grad_latent_space);
+    cudaFree(d_grad_latent_space_prev);
     cudaFree(d_grad_input);
+
+
+
+void scale_gradients(Autoencoder* autoencoder, float scaling_factor) {
+    // Scale gradients in encoder
+    for (int i = 0; i < NUM_KERNELS; i++) {
+        scale_conv_gradients(&autoencoder->encoder.conv1.convs[i], scaling_factor);
+        scale_conv_gradients(&autoencoder->encoder.conv2.convs[i], scaling_factor);
+    }
+    // Scale gradients in decoder
+    for (int i = 0; i < NUM_KERNELS; i++) {
+        scale_conv_gradients(&autoencoder->decoder.deconv1.convs[i], scaling_factor);
+        scale_conv_gradients(&autoencoder->decoder.deconv2.convs[i], scaling_factor);
+    }
+}
+
+void scale_conv_gradients(Conv3D* conv, float scaling_factor) {
+    int weight_size = conv->kernelD * conv->kernelH * conv->kernelW;
+    int threads = 256;
+    int blocks = (weight_size + threads - 1) / threads;
+
+    scale_kernel<<<blocks, threads>>>(conv->grad_weights, scaling_factor, weight_size);
+    cudaErrorCheck();
+
+    // Scale biases
+    scale_kernel<<<1, 1>>>(conv->grad_biases, scaling_factor, 1);
+    cudaErrorCheck();
+}
+
+__global__ void scale_kernel(float* data, float scaling_factor, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        data[idx] *= scaling_factor;
+    }
+}
+
+void update_weights_autoencoder(Autoencoder* autoencoder, float learning_rate) {
+    // Update weights in encoder
+    for (int i = 0; i < NUM_KERNELS; i++) {
+        conv3d_update_weights(&autoencoder->encoder.conv1.convs[i], learning_rate);
+        conv3d_update_weights(&autoencoder->encoder.conv2.convs[i], learning_rate);
+    }
+    // Update weights in decoder
+    for (int i = 0; i < NUM_KERNELS; i++) {
+        conv3d_update_weights(&autoencoder->decoder.deconv1.convs[i], learning_rate);
+        conv3d_update_weights(&autoencoder->decoder.deconv2.convs[i], learning_rate);
+    }
+}
 
 
 void backward_autoencoder_batch(Autoencoder* autoencoder, float** d_input_batch, float** d_output_batch, float** d_target_batch, int batch_size, float learning_rate) {
