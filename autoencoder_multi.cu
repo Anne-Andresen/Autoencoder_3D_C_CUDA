@@ -103,27 +103,71 @@ void conv3d_execute(Conv3D* conv, float* output) {
     conv3d_kernel<<<gridDim, blockDim>>>(conv->input, conv->weights, conv->biases, conv->output, conv->D, conv->H, conv->W, conv->kernelD, conv->kernelH, conv->kernelW);
 }
 
-void conv3d_backprop(Conv3D* conv, float* grad_output, float* grad_input) {
+void conv3d_backprop(Conv3D* conv, float* d_grad_output, float* d_grad_input) {
     cudaMemset(conv->grad_weights, 0, conv->kernelD * conv->kernelH * conv->kernelW * sizeof(float));
     cudaMemset(conv->grad_biases, 0, sizeof(float));
+
     dim3 blockDim(8, 8, 8);
-    dim3 gridDim((conv->W + blockDim.x - 1) / blockDim.x, (conv->H + blockDim.y - 1) / blockDim.y, (conv->D + blockDim.z - 1) / blockDim.z);
+    dim3 gridDim(
+        (conv->W + blockDim.x - 1) / blockDim.x,
+        (conv->H + blockDim.y - 1) / blockDim.y,
+        (conv->D + blockDim.z - 1) / blockDim.z
+    );
+
     conv3d_backward_kernel<<<gridDim, blockDim>>>(
-    conv->input,
-    conv->weights,
-    d_inter_grad_output,
-    d_temp_grad_input,
-    conv->grad_weights,
-    conv->grad_biases,
-    conv->D,
-    conv->H,
-    conv->W,
-    conv->kernelD,
-    conv->kernelH,
-    conv->kernelW
-);
+        conv->input,
+        conv->weights,
+        d_grad_output,
+        d_grad_input,
+        conv->grad_weights,
+        conv->grad_biases,
+        conv->D,
+        conv->H,
+        conv->W,
+        conv->kernelD,
+        conv->kernelH,
+        conv->kernelW
+    );
     cudaErrorCheck();
 }
+__global__ void conv3d_backward_kernel(
+    const float* input, const float* weights, const float* d_grad_output,
+    float* d_grad_input, float* grad_weights, float* grad_biases,
+    int D, int H, int W, int kD, int kH, int kW) {
+
+    int x = blockIdx.x * blockDim.x + threadIdx.x; // Width index
+    int y = blockIdx.y * blockDim.y + threadIdx.y; // Height index
+    int z = blockIdx.z * blockDim.z + threadIdx.z; // Depth index
+
+    if (x < W && y < H && z < D) {
+        // Compute gradient w.r.t input
+        float grad_input = 0.0f;
+        for (int kd = 0; kd < kD; kd++) {
+            for (int kh = 0; kh < kH; kh++) {
+                for (int kw = 0; kw < kW; kw++) {
+                    int out_d = z + kd - kD / 2;
+                    int out_h = y + kh - kH / 2;
+                    int out_w = x + kw - kW / 2;
+                    if (out_d >= 0 && out_d < D && out_h >= 0 && out_h < H && out_w >= 0 && out_w < W) {
+                        float grad_out = d_grad_output[(out_d * H + out_h) * W + out_w];
+                        float weight = weights[(kd * kH + kh) * kW + kw];
+                        grad_input += grad_out * weight;
+
+                        // Compute gradients w.r.t weights
+                        float input_val = input[(z * H + y) * W + x];
+                        atomicAdd(&grad_weights[(kd * kH + kh) * kW + kw], grad_out * input_val);
+                    }
+                }
+            }
+        }
+        d_grad_input[(z * H + y) * W + x] = grad_input;
+
+        // Compute gradients w.r.t biases
+        atomicAdd(&grad_biases[0], d_grad_output[(z * H + y) * W + x]);
+    }
+}
+
+
 void conv3d_update_weights(Conv3D* conv, float learning_rate) {
     int size = conv->kernelD * conv->kernelH * conv->kernelW;
     int threads = 256;
@@ -149,6 +193,13 @@ __global__ void relu_activation_kernel(float* data, int size) {
         data[idx] = fmaxf(0.0f, data[idx]);
     }
 }
+__global__ void relu_backward_kernel(const float* d_output, const float* activation_input, float* d_input, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        d_input[idx] = activation_input[idx] > 0 ? d_output[idx] : 0.0f;
+    }
+}
+
 /*
 // After conv3d_forward_kernel
 int size = conv->D * conv->H * conv->W;
@@ -245,7 +296,6 @@ __global__ void conv3d_forward_kernel(const float* input, const float* kernel, c
 
 
 
-
 void forward_conv_layer(ConvLayer* layer, float* d_input, float* d_output) {
     float* d_temp_output;
     cudaMalloc(&d_temp_output, layer->convs[0].D * layer->convs[0].H * layer->convs[0].W * sizeof(float));
@@ -264,7 +314,7 @@ void forward_conv_layer(ConvLayer* layer, float* d_input, float* d_output) {
         conv3d_forward_kernel<<<gridDim, blockDim>>>(
             d_inter_output,
             conv->weights,
-            conv->biases,  // Assuming biases are needed
+            conv->biases,
             d_temp_output,
             conv->D,
             conv->H,
@@ -275,6 +325,13 @@ void forward_conv_layer(ConvLayer* layer, float* d_input, float* d_output) {
         );
         cudaErrorCheck();
 
+        // Apply ReLU activation
+        int size = conv->D * conv->H * conv->W;
+        int threads = 256;
+        int blocks = (size + threads - 1) / threads;
+        relu_activation_kernel<<<blocks, threads>>>(d_temp_output, size);
+        cudaErrorCheck();
+
         if (i < NUM_KERNELS - 1) {
             d_inter_output = d_temp_output;
         } else {
@@ -283,6 +340,7 @@ void forward_conv_layer(ConvLayer* layer, float* d_input, float* d_output) {
     }
     cudaFree(d_temp_output);
 }
+
 
 void forward_encoder(Encoder* encoder, float* d_input, float* d_output) {
     float* d_inter_output;
@@ -330,9 +388,10 @@ void forward_encoder_batch(Encoder* encoder, float** d_input_batch, float** d_ou
 }*/
 void forward_encoder_batch(Encoder* encoder, float** d_input_batch, float** d_output_batch, int batch_size) {
     for (int i = 0; i < batch_size; i++) {
-        forward_encoder(&encoder, d_input_batch[i], d_output_batch[i]);
+        forward_encoder(encoder, d_input_batch[i], d_output_batch[i]);
     }
 }
+
 
 
 void forward_autoencoder_batch(Autoencoder* autoencoder, float** d_input_batch, float** d_output_batch, int batch_size) {
@@ -353,13 +412,15 @@ void forward_autoencoder_batch(Autoencoder* autoencoder, float** d_input_batch, 
 
 void backward_conv_layer(ConvLayer* layer, float* d_grad_output, float* d_grad_input) {
     float* d_temp_grad_input;
-    cudaMalloc(&d_temp_grad_input, layer->convs[0].D * layer->convs[0].H * layer->convs[0].W * sizeof(float));
-
     float* d_inter_grad_output = d_grad_output;
 
     for (int i = NUM_KERNELS - 1; i >= 0; i--) {
         Conv3D* conv = &layer->convs[i];
 
+        // Allocate memory for the gradient w.r.t input
+        cudaMalloc(&d_temp_grad_input, conv->D * conv->H * conv->W * sizeof(float));
+
+        // Set up grid and block dimensions
         dim3 blockDim(8, 8, 8);
         dim3 gridDim(
             (conv->W + blockDim.x - 1) / blockDim.x,
@@ -367,10 +428,11 @@ void backward_conv_layer(ConvLayer* layer, float* d_grad_output, float* d_grad_i
             (conv->D + blockDim.z - 1) / blockDim.z
         );
 
+        // Corrected kernel call
         conv3d_backward_kernel<<<gridDim, blockDim>>>(
-            d_inter_grad_output,
+            conv->input,
             conv->weights,
-            conv->biases,
+            d_inter_grad_output,
             d_temp_grad_input,
             conv->grad_weights,
             conv->grad_biases,
@@ -383,127 +445,106 @@ void backward_conv_layer(ConvLayer* layer, float* d_grad_output, float* d_grad_i
         );
         cudaErrorCheck();
 
+        // Apply ReLU backward if ReLU was used
+        int size = conv->D * conv->H * conv->W;
+        int threads = 256;
+        int blocks = (size + threads - 1) / threads;
+        relu_backward_kernel<<<blocks, threads>>>(
+            d_temp_grad_input,
+            conv->input,  // Assuming you saved activation input
+            d_temp_grad_input,
+            size
+        );
+        cudaErrorCheck();
+
         if (i > 0) {
+            // Prepare for next iteration
             d_inter_grad_output = d_temp_grad_input;
         } else {
+            // For the first layer, copy the gradient to d_grad_input
             cudaMemcpy(d_grad_input, d_temp_grad_input, conv->D * conv->H * conv->W * sizeof(float), cudaMemcpyDeviceToDevice);
+            cudaFree(d_temp_grad_input);
         }
     }
-
-    cudaFree(d_temp_grad_input);
 }
-
-__global__ void conv3d_backward_kernel(
-    const float* input, const float* weights, const float* d_grad_output,
-    float* d_grad_input, float* grad_weights, float* grad_biases,
-    int D, int H, int W, int kD, int kH, int kW) {
-
-    int x = blockIdx.x * blockDim.x + threadIdx.x; // Width index
-    int y = blockIdx.y * blockDim.y + threadIdx.y; // Height index
-    int z = blockIdx.z * blockDim.z + threadIdx.z; // Depth index
-
-    if (x < W && y < H && z < D) {
-        // Compute gradient w.r.t input
-        float grad_input = 0.0f;
-        for (int kd = 0; kd < kD; kd++) {
-            for (int kh = 0; kh < kH; kh++) {
-                for (int kw = 0; kw < kW; kw++) {
-                    int out_d = z + kd - kD / 2;
-                    int out_h = y + kh - kH / 2;
-                    int out_w = x + kw - kW / 2;
-                    if (out_d >= 0 && out_d < D && out_h >= 0 && out_h < H && out_w >= 0 && out_w < W) {
-                        float grad_out = d_grad_output[(out_d * H + out_h) * W + out_w];
-                        float weight = weights[(kd * kH + kh) * kW + kw];
-                        grad_input += grad_out * weight;
-
-                        // Compute gradients w.r.t weights
-                        float input_val = input[(z * H + y) * W + x];
-                        atomicAdd(&grad_weights[(kd * kH + kh) * kW + kw], grad_out * input_val);
-                    }
-                }
-            }
-        }
-        d_grad_input[(z * H + y) * W + x] = grad_input;
-
-        // Compute gradients w.r.t biases
-        atomicAdd(&grad_biases[0], d_grad_output[(z * H + y) * W + x]);
-    }
-}
-
 
 
 void backward_autoencoder(Autoencoder* autoencoder, float* d_input, float* d_output, float* d_target, float learning_rate) {
-    float* d_grad_output;
-    cudaMalloc(&d_grad_output, autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].D * autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].H * autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].W * sizeof(float));
-    int size = autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].D * autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].H * autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].W;
+    int size = autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].D *
+               autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].H *
+               autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].W;
+
     float* d_grad_output;
     cudaMalloc(&d_grad_output, size * sizeof(float));
 
     int threads_per_block = 256;
     int blocks_per_grid = (size + threads_per_block - 1) / threads_per_block;
 
-    compute_grad_output_kernel<<<blocks_per_grid, threads_per_block>>>(d_output, d_target, d_grad_output, size);
+    compute_grad_output_kernel<<<blocks_per_grid, threads_per_block>>>(
+        d_output,
+        d_target,
+        d_grad_output,
+        size
+    );
     cudaErrorCheck();
 
+    // Backpropagate through the decoder
     float* d_grad_latent_space;
-    cudaMalloc(&d_grad_latent_space, autoencoder->decoder.deconv1.convs[NUM_KERNELS - 1].D * autoencoder->decoder.deconv1.convs[NUM_KERNELS - 1].H * autoencoder->decoder.deconv1.convs[NUM_KERNELS - 1].W * sizeof(float));
+    cudaMalloc(&d_grad_latent_space, size_of_latent_space);
     backward_conv_layer(&autoencoder->decoder.deconv2, d_grad_output, d_grad_latent_space);
-
-    float* d_grad_intermediate;
-    cudaMalloc(&d_grad_intermediate, autoencoder->encoder.conv2.convs[NUM_KERNELS - 1].D * autoencoder->encoder.conv2.convs[NUM_KERNELS - 1].H * autoencoder->encoder.conv2.convs[NUM_KERNELS - 1].W * sizeof(float));
-    backward_conv_layer(&autoencoder->decoder.deconv1.convs[NUM_KERNELS - 1], d_grad_latent_space, d_grad_intermediate);
-    
-    
-    cudaMalloc(&d_grad_input, autoencoder->encoder.conv1.convs[NUM_KERNELS - 1].D * autoencoder->encoder.conv1.convs[NUM_KERNELS - 1].H * autoencoder->encoder.conv1.convs[NUM_KERNELS - 1].W * sizeof(float));
-    backward_conv_layer(&autoencoder->encoder.conv2, d_grad_intermediate, d_grad_input);
-
-
+    backward_conv_layer(&autoencoder->decoder.deconv1, d_grad_latent_space, d_grad_latent_space_prev);
+    // Backpropagate through the encoder
+    backward_conv_layer(&autoencoder->encoder.conv2, d_grad_latent_space_prev, d_grad_input);
     backward_conv_layer(&autoencoder->encoder.conv1, d_grad_input, NULL);
 
-    for (int i = 0; i < NUM_KERNELS; i++) {
-        conv3d_update_weights(&autoencoder->encoder.conv1[i], learning_rate);
-        conv3d_update_weights(&autoencoder->encoder.conv2[i], learning_rate);
-        conv3d_update_weights(&autoencoder->decoder.deconv1[i], learning_rate);
-        conv3d_update_weights(&autoencoder->decoder.deconv2[i], learning_rate);
-    }
-
-    cudaFree(d_grad_input);
+    // Free allocated memory
+    cudaFree(d_grad_output);
     cudaFree(d_grad_latent_space);
-    cudaFree(d_grad_intermediate);
+    cudaFree(d_grad_input);
 
-}
 
 void backward_autoencoder_batch(Autoencoder* autoencoder, float** d_input_batch, float** d_output_batch, float** d_target_batch, int batch_size, float learning_rate) {
-    float** d_grad_output_batch = (float**)malloc(batch_size * sizeof(float*));
+    // Reset gradients
+    reset_gradients(autoencoder);
+
+    // Loop over batch
     for (int i = 0; i < batch_size; i++) {
-        cudaMalloc(&d_grad_output_batch[i], autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].D * autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].H * autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].W * sizeof(float));
-        for (int j = 0; j < autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].D * autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].H * autoencoder->decoder.deconv2.convs[NUM_KERNELS - 1].W; j++) {
-            d_grad_output_batch[i][j] = 2 * (d_output_batch[i][j] - d_target_batch[i][j]);
-        }
+        // Perform backward pass for each sample
+        backward_autoencoder(autoencoder, d_input_batch[i], d_output_batch[i], d_target_batch[i], learning_rate);
     }
 
-  
-    // Ensure to accumulate gradients across the batch
+    // Scale gradients by batch size
+    float scaling_factor = 1.0f / batch_size;
+    scale_gradients(autoencoder, scaling_factor);
 
-    for (int i = 0; i < NUM_KERNELS; i++) {
-        conv3d_update_weights(&autoencoder->encoder.conv1.convs[i], learning_rate / batch_size);
-        conv3d_update_weights(&autoencoder->encoder.conv2.convs[i], learning_rate / batch_size);
-        conv3d_update_weights(&autoencoder->decoder.deconv1.convs[i], learning_rate / batch_size);
-        conv3d_update_weights(&autoencoder->decoder.deconv2.convs[i], learning_rate / batch_size);
-    }
-
-    for (int i = 0; i < batch_size; i++) {
-        cudaFree(d_grad_output_batch[i]);
-    }
-    free(d_grad_output_batch);
+    // Update weights
+    update_weights_autoencoder(autoencoder, learning_rate);
 }
+
+
+
 __global__ void accumulate_gradients_kernel(float* accumulated_gradients, const float* gradients, int num_elements, int batch_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_elements) {
         accumulated_gradients[idx] += gradients[idx] / batch_size;
     }
 }
-
+void reset_gradients(Autoencoder* autoencoder) {
+    // Reset gradients in encoder
+    for (int i = 0; i < NUM_KERNELS; i++) {
+        cudaMemset(autoencoder->encoder.conv1.convs[i].grad_weights, 0, weight_size);
+        cudaMemset(autoencoder->encoder.conv1.convs[i].grad_biases, 0, sizeof(float));
+        cudaMemset(autoencoder->encoder.conv2.convs[i].grad_weights, 0, weight_size);
+        cudaMemset(autoencoder->encoder.conv2.convs[i].grad_biases, 0, sizeof(float));
+    }
+    // Reset gradients in decoder
+    for (int i = 0; i < NUM_KERNELS; i++) {
+        cudaMemset(autoencoder->decoder.deconv1.convs[i].grad_weights, 0, weight_size);
+        cudaMemset(autoencoder->decoder.deconv1.convs[i].grad_biases, 0, sizeof(float));
+        cudaMemset(autoencoder->decoder.deconv2.convs[i].grad_weights, 0, weight_size);
+        cudaMemset(autoencoder->decoder.deconv2.convs[i].grad_biases, 0, sizeof(float));
+    }
+}
 
 
 __global__ void compute_grad_output_kernel(const float* d_output, const float* d_target, float* d_grad_output, int size) {
@@ -512,6 +553,7 @@ __global__ void compute_grad_output_kernel(const float* d_output, const float* d
         d_grad_output[idx] = 2.0f * (d_output[idx] - d_target[idx]);
     }
 }
+
 
 __global__ void update_weights(float* weights, const float* gradients, float learning_rate, int num_weights) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
