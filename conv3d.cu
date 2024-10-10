@@ -211,10 +211,17 @@ void conv3d_init(Conv3D* conv, int inputDepth, int inputHeight, int inputWidth, 
     conv->kernelD = kernelD;
     conv->kernelH = kernelH;
     conv->kernelW = kernelW;
+    /*
     conv->weights = (float*)malloc(kernelD * kernelH * kernelW * sizeof(float));
     conv->biases = (float*)malloc(sizeof(float));
     conv->grad_weights = (float*)malloc(kernelD * kernelH * kernelW * sizeof(float));
     conv->grad_biases = (float*)malloc(sizeof(float));
+    */
+    cudaMalloc(&(conv->weights), kernelD * kernelH * kernelW * sizeof(float));
+    cudaMalloc(&(conv->biases), sizeof(float));
+    cudaMalloc(&(conv->grad_weights), kernelD * kernelH * kernelW * sizeof(float));
+    cudaMalloc(&(conv->grad_biases), sizeof(float));
+
     // Initialize weights and biases
     for (int i = 0; i < kernelD * kernelH * kernelW; i++) {
         conv->weights[i] = (float)rand() / RAND_MAX;
