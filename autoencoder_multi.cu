@@ -295,15 +295,17 @@ __global__ void conv3d_forward_kernel(const float* input, const float* kernel, c
 
 
 
-
 void forward_conv_layer(ConvLayer* layer, float* d_input, float* d_output) {
-    float* d_temp_output;
-    cudaMalloc(&d_temp_output, layer->convs[0].D * layer->convs[0].H * layer->convs[0].W * sizeof(float));
     float* d_inter_output = d_input;
+    float* d_temp_output = NULL;
 
     for (int i = 0; i < NUM_KERNELS; i++) {
         Conv3D* conv = &layer->convs[i];
 
+        // Allocate output buffer for this layer
+        cudaMalloc(&d_temp_output, conv->D * conv->H * conv->W * sizeof(float));
+
+        // Set up grid and block dimensions
         dim3 blockDim(8, 8, 8);
         dim3 gridDim(
             (conv->W + blockDim.x - 1) / blockDim.x,
@@ -311,6 +313,7 @@ void forward_conv_layer(ConvLayer* layer, float* d_input, float* d_output) {
             (conv->D + blockDim.z - 1) / blockDim.z
         );
 
+        // Perform convolution
         conv3d_forward_kernel<<<gridDim, blockDim>>>(
             d_inter_output,
             conv->weights,
@@ -325,27 +328,32 @@ void forward_conv_layer(ConvLayer* layer, float* d_input, float* d_output) {
         );
         cudaErrorCheck();
 
+        // Save pre-activation output
+        cudaMalloc(&conv->pre_activation_output, conv->D * conv->H * conv->W * sizeof(float));
+        cudaMemcpy(conv->pre_activation_output, d_temp_output, conv->D * conv->H * conv->W * sizeof(float), cudaMemcpyDeviceToDevice);
+
         // Apply ReLU activation
         int size = conv->D * conv->H * conv->W;
         int threads = 256;
         int blocks = (size + threads - 1) / threads;
-        float* pre_activation_output;
-
-        // In forward_conv_layer, before applying ReLU:
-        cudaMalloc(&conv->pre_activation_output, conv->D * conv->H * conv->W * sizeof(float));
-        cudaMemcpy(conv->pre_activation_output, d_temp_output, conv->D * conv->H * conv->W * sizeof(float), cudaMemcpyDeviceToDevice);
         relu_activation_kernel<<<blocks, threads>>>(d_temp_output, size);
         cudaErrorCheck();
 
+        // Free or update pointers appropriately
         if (i < NUM_KERNELS - 1) {
+            if (d_inter_output != d_input){
+                cudaFree(d_inter_output);
+            }
             d_inter_output = d_temp_output;
+            d_temp_output = NULL;
         } else {
             cudaMemcpy(d_output, d_temp_output, conv->D * conv->H * conv->W * sizeof(float), cudaMemcpyDeviceToDevice);
+            cudaFree(d_temp_output);
+            d_temp_output = NULL;
         }
-        cudaFree(conv->pre_activation_output);
     }
-    cudaFree(d_temp_output);
 }
+
 
 
 void forward_encoder(Encoder* encoder, float* d_input, float* d_output) {
