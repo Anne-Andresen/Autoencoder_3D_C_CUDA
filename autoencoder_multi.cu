@@ -108,7 +108,20 @@ void conv3d_backprop(Conv3D* conv, float* grad_output, float* grad_input) {
     cudaMemset(conv->grad_biases, 0, sizeof(float));
     dim3 blockDim(8, 8, 8);
     dim3 gridDim((conv->W + blockDim.x - 1) / blockDim.x, (conv->H + blockDim.y - 1) / blockDim.y, (conv->D + blockDim.z - 1) / blockDim.z);
-    conv3d_backward_kernel<<<gridDim, blockDim>>>(conv->input, conv->weights, conv->biases, grad_output, grad_input, conv->grad_weights, conv->grad_biases, conv->D, conv->H, conv->W, conv->kernelD, conv->kernelH, conv->kernelW);
+    conv3d_backward_kernel<<<gridDim, blockDim>>>(
+    conv->input,
+    conv->weights,
+    d_inter_grad_output,
+    d_temp_grad_input,
+    conv->grad_weights,
+    conv->grad_biases,
+    conv->D,
+    conv->H,
+    conv->W,
+    conv->kernelD,
+    conv->kernelH,
+    conv->kernelW
+);
     cudaErrorCheck();
 }
 void conv3d_update_weights(Conv3D* conv, float learning_rate) {
@@ -230,36 +243,7 @@ __global__ void conv3d_forward_kernel(const float* input, const float* kernel, c
 }
 
 
-__global__ void conv3d_backward_kernel(const float* d_output, const float* kernel, float* d_input,
-                                       int inputDepth, int inputHeight, int inputWidth,
-                                       int kernelDepth, int kernelHeight, int kernelWidth,
-                                       int outputDepth, int outputHeight, int outputWidth) {
-    // Identify position in input volume
-    int d = blockIdx.z * blockDim.z + threadIdx.z;
-    int h = blockIdx.y * blockDim.y + threadIdx.y;
-    int w = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (d < inputDepth && h < inputHeight && w < inputWidth) {
-        float gradient = 0.0f;
-
-        for (int kd = 0; kd < kernelDepth; kd++) {
-            for (int kh = 0; kh < kernelHeight; kh++) {
-                for (int kw = 0; kw < kernelWidth; kw++) {
-                    int out_d = d - kd;
-                    int out_h = h - kh;
-                    int out_w = w - kw;
-
-                    if (out_d >= 0 && out_h >= 0 && out_w >= 0 && out_d < outputDepth && out_h < outputHeight && out_w < outputWidth) {
-                        gradient += d_output[out_d * outputHeight * outputWidth + out_h * outputWidth + out_w] *
-                                    kernel[kd * kernelHeight * kernelWidth + kh * kernelWidth + kw];
-                    }
-                }
-            }
-        }
-
-        d_input[d * inputHeight * inputWidth + h * inputWidth + w] = gradient;
-    }
-}
 
 
 void forward_conv_layer(ConvLayer* layer, float* d_input, float* d_output) {
@@ -367,7 +351,7 @@ void forward_autoencoder_batch(Autoencoder* autoencoder, float** d_input_batch, 
 }
 
 
-vvoid backward_conv_layer(ConvLayer* layer, float* d_grad_output, float* d_grad_input) {
+void backward_conv_layer(ConvLayer* layer, float* d_grad_output, float* d_grad_input) {
     float* d_temp_grad_input;
     cudaMalloc(&d_temp_grad_input, layer->convs[0].D * layer->convs[0].H * layer->convs[0].W * sizeof(float));
 
@@ -468,8 +452,8 @@ void backward_autoencoder(Autoencoder* autoencoder, float* d_input, float* d_out
     float* d_grad_intermediate;
     cudaMalloc(&d_grad_intermediate, autoencoder->encoder.conv2.convs[NUM_KERNELS - 1].D * autoencoder->encoder.conv2.convs[NUM_KERNELS - 1].H * autoencoder->encoder.conv2.convs[NUM_KERNELS - 1].W * sizeof(float));
     backward_conv_layer(&autoencoder->decoder.deconv1.convs[NUM_KERNELS - 1], d_grad_latent_space, d_grad_intermediate);
-
-    float* d_grad_input;
+    
+    
     cudaMalloc(&d_grad_input, autoencoder->encoder.conv1.convs[NUM_KERNELS - 1].D * autoencoder->encoder.conv1.convs[NUM_KERNELS - 1].H * autoencoder->encoder.conv1.convs[NUM_KERNELS - 1].W * sizeof(float));
     backward_conv_layer(&autoencoder->encoder.conv2, d_grad_intermediate, d_grad_input);
 
@@ -521,12 +505,7 @@ __global__ void accumulate_gradients_kernel(float* accumulated_gradients, const 
 }
 
 
-__global__ void conv3d_backward_kernel(
-    float* input, float* weights, float* d_grad_output,
-    float* d_grad_input, float* grad_weights, float* grad_biases,
-    int D, int H, int W, int kD, int kH, int kW) {
-    // Compute gradients here
-}
+
 __global__ void compute_grad_output_kernel(const float* d_output, const float* d_target, float* d_grad_output, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -548,17 +527,7 @@ typedef struct {
     float* velocity;
 } Optimizer;
 
-void update_weights_with_momentum(Conv3D* conv, float* gradients, Optimizer* optimizer, float learning_rate, float momentum, int num_weights) {
-    // Allocate space for velocity if not already done
-    if (optimizer->velocity == NULL) {
-        cudaMalloc(&(optimizer->velocity), num_weights * sizeof(float));
-        cudaMemset(optimizer->velocity, 0, num_weights * sizeof(float)); // Initialize to zero
-    }
 
-    // Update weights using gradient and momentum
-    update_weights_with_momentum_kernel<<<gridDim, blockDim>>>(conv->weights, gradients, optimizer->velocity, learning_rate, momentum, num_weights);
-    cudaErrorCheck();
-}
 
 
 __global__ void update_weights_kernel(float* weights, float* grad_weights, float learning_rate, int size) {
@@ -580,29 +549,6 @@ void conv3d_update_weights(Conv3D* conv, float learning_rate) {
     cudaErrorCheck();
 }
 
-
-
-// Launching the kernel
-void update_weights_host(float* d_weights, float* d_gradients, float learning_rate, int num_weights) {
-    int threads_per_block = 256;
-    int blocks_per_grid = (num_weights + threads_per_block - 1) / threads_per_block;
-
-    update_weights<<<blocks_per_grid, threads_per_block>>>(d_weights, d_gradients, learning_rate, num_weights);
-    cudaDeviceSynchronize();
-}
-
-float* allocate_large_memory_block(int total_size) {
-    float* d_memory_block;
-    cudaMalloc((void**)&d_memory_block, total_size * sizeof(float));
-    cudaMemset(d_memory_block, 0, total_size * sizeof(float)); // Initialize to zero
-    return d_memory_block;
-}
-
-void free_large_memory_block(float* d_memory_block) {
-    if (d_memory_block != NULL) {
-        cudaFree(d_memory_block);
-    }
-}
 
 
 void train_autoencoder_old(Autoencoder* autoencoder, float* d_input, float* d_target, int inputSize, int epochs, float learning_rate) {
